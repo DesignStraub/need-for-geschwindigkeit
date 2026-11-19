@@ -73,6 +73,10 @@ var language := ""
 var vsync := true
 var fps_limit := 0
 var fullscreen := false
+## Lautstärke (seit 2.52) in Stufen 0..10: Musik und Effekte (Motor, Reifen, Verkehr, Menütöne). Effekte stehen von
+## Haus aus eine Stufe tiefer (gut 3 dB), damit Motor und Reifen die Musik nicht übertönen.
+var vol_music := 10
+var vol_sfx := 8
 
 var wins := 0  # Rennsiege (Sprint + Rundkurs)
 var drift_wins := 0
@@ -85,6 +89,14 @@ var world_pos: Array = []
 ## Entdeckte Städte (seit 2.42): Schnellreise geht nur dorthin. Ältere Spielstände: Städte, in denen man schon ein Rennen
 ## gewonnen oder eine Bestzeit hat, gelten als entdeckt.
 var towns_known: Array = []
+## Entdeckte Orte außer Städten (seit 2.49): "gelaende:<Name>", "hw:<Name>" (Start eines Autobahn-Rennens); die große
+## Karte springt nur dorthin, wo man schon war
+var places_known: Array = []
+## Wo Verstecktes gefunden wurde (seit 2.50): Schlüssel -> [x, y, z, Blickrichtung]; Werkstätten sind Sprungziele
+var secret_pos := {}
+## Umgebaute Strecken (seit 2.51): Rennen -> Version; ist die gespeicherte älter, zählt die alte Bestzeit nicht mehr
+const TRACK_REVS := {"Innenstadtring": 251}
+var track_revs := {}
 var last_town := ""  # zuletzt erreichte Stadt: Start an ihrem Eingang, falls der gemerkte Ort nicht mehr befahrbar ist
 var highway_won: Array = []  # gewonnene Autobahn-Rennen (seit 2.43, highway_race.gd): Name; Bestzeiten in best_times
 var drift_best := {}  # Driftzonen (seit 2.45): Zone ("Ort#Rennen") -> beste Punktzahl
@@ -280,6 +292,22 @@ func apply_display() -> void:
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
 
 
+const SFX_CUT := 3.0
+
+
+## Lautstärke anwenden. Musik läuft auf dem Bus "Musik", alles andere direkt oder über "Hall" auf Master; der Musik-Bus
+## gleicht darum aus, was Master für die Effekte leiser wird (SFX_CUT: Effekte von Haus aus 3 dB unter der Musik, seit 2.30).
+## Stufe -> dB: 40·log10(Stufe/10) (8 = -3,9 dB, 5 = -12 dB), 0 = stumm.
+func apply_audio() -> void:
+	var sfx_db := -60.0 if vol_sfx <= 0 else 40.0 * log(vol_sfx / 10.0) / log(10.0)
+	var mus_db := 40.0 * log(maxf(vol_music, 1) / 10.0) / log(10.0)
+	AudioServer.set_bus_volume_db(0, -SFX_CUT + sfx_db)
+	var bi := AudioServer.get_bus_index("Musik")
+	if bi >= 0:
+		AudioServer.set_bus_volume_db(bi, SFX_CUT - sfx_db + mus_db)
+		AudioServer.set_bus_mute(bi, vol_music <= 0)
+
+
 ## Eine Einstellung weiterschalten (dir -1: zurück), anwenden und speichern
 func cycle_setting(key: String, dir := 1) -> void:
 	if GFX.has(key):
@@ -322,6 +350,12 @@ func cycle_setting(key: String, dir := 1) -> void:
 			difficulty = posmod(difficulty + dir, 3)
 		"show_fps":
 			show_fps = not show_fps
+		"vol_music":
+			vol_music = posmod(vol_music + dir, 11)
+			apply_audio()
+		"vol_sfx":
+			vol_sfx = posmod(vol_sfx + dir, 11)
+			apply_audio()
 	apply_display()
 	graphics_changed.emit()
 	save_game()
@@ -434,6 +468,10 @@ func setting_text(key: String) -> String:
 			return tr("Kamerawackeln: ") + tr("An" if cam_shake else "Aus")
 		"difficulty":
 			return tr("Schwierigkeit: ") + tr(DIFFICULTY_NAMES[difficulty])
+		"vol_music":
+			return tr("Musik: ") + ("%d %%" % (vol_music * 10) if vol_music > 0 else tr("Aus"))
+		"vol_sfx":
+			return tr("Effekte: ") + ("%d %%" % (vol_sfx * 10) if vol_sfx > 0 else tr("Aus"))
 	if GFX.has(key):
 		return tr(GFX[key]["label"]) + ": " + tr(GFX[key]["levels"][gfx[key]])
 	return key
@@ -520,9 +558,17 @@ func total_wins() -> int:
 	return wins + drift_wins
 
 
-## Tempo-Stufe: am Anfang fahren alle langsamer (72 %), mit jedem Sieg etwas schneller, ab 20 Siegen volles Tempo
+## Tempo-Stufe: am Anfang fahren alle langsamer, mit jedem Sieg etwas schneller, ab 20 Siegen das volle Tempo. Seit
+## 2.49 ruhiger (vorher 72 % bis 100 %): Grundtempo war zu hoch. Underground holte das Tempogefühl aus Unschärfe,
+## Lichtspuren und Kamera, nicht aus mehr km/h; enge Stadtstraßen wirken schon bei 160 km/h schnell.
 func pace() -> float:
-	return 0.72 + 0.28 * clampf(total_wins() / 20.0, 0.0, 1.0)
+	return 0.66 + 0.24 * clampf(total_wins() / 20.0, 0.0, 1.0)
+
+
+## Anteil der Beschleunigung zur Tempo-Stufe (für alle gleich: Spieler, Gegner, Spieler 2). Seit 2.49 etwas weniger
+## Schub (vorher 0,8 + 0,2 · pace): Anfahren und Durchzug wirkten zu spritzig.
+func accel_k() -> float:
+	return 0.74 + 0.2 * pace()
 
 
 # --- Fahrer-Level (seit 2.32) ------------------------------------------------
@@ -612,7 +658,20 @@ func unlock_text(car_id: String) -> String:
 
 
 func is_part_unlocked(category: String, index: int) -> bool:
-	return level() >= int(Catalog.PARTS[category]["options"][index].get("level", 0)) or "%s:%d" % [category, index] in kept_parts
+	var opt: Dictionary = Catalog.PARTS[category]["options"][index]
+	if opt.has("find"):  # seit 2.50: Werkstatt-Lack, Kennzeichen: erst nach dem Fund in der Welt
+		return place_known(str(opt["find"]))
+	return level() >= int(opt.get("level", 0)) or "%s:%d" % [category, index] in kept_parts
+
+
+## Sperrtext eines Teils: "AB LEVEL 8" bzw. bei versteckten Teilen, wo sie liegen
+func part_lock_text(category: String, index: int) -> String:
+	var opt: Dictionary = Catalog.PARTS[category]["options"][index]
+	if opt.has("find"):
+		var f := str(opt["find"])
+		var town := f.substr(f.find(":") + 1)
+		return (tr("VERSTECKTE WERKSTATT IN %s") if f.begins_with("werkstatt:") else tr("KENNZEICHEN VERSTECKT IN %s")) % town.to_upper()
+	return tr("AB LEVEL %d") % int(opt.get("level", 1))
 
 
 ## Titel t (Catalog.TITLES) ist frei
@@ -794,9 +853,9 @@ func save_game() -> void:
 		"gfx": {"preset": preset, "opts": gfx, "pixel": pixel_look, "vsync": vsync, "fps": fps_limit, "fullscreen": fullscreen,
 			"touch": touch_mode, "show_fps": show_fps, "jump_cam": jump_cam, "motion_blur": motion_blur,
 			"speed_fov": speed_fov, "cam_shake": cam_shake, "cam": cam_mode},
-		"language": language, "difficulty": difficulty,
+		"language": language, "difficulty": difficulty, "audio": {"music": vol_music, "sfx": vol_sfx},
 		"world_pos": world_pos, "towns_known": towns_known, "last_town": last_town, "highway_won": highway_won,
-		"drift_best": drift_best,
+		"drift_best": drift_best, "places_known": places_known, "secret_pos": secret_pos, "track_revs": track_revs,
 	}, "\t")
 	var f := FileAccess.open(save_path, FileAccess.WRITE)
 	if f:
@@ -811,6 +870,19 @@ func save_game() -> void:
 ## Stadt entdeckt? (Schnellreise dorthin frei)
 func town_known(town: String) -> bool:
 	return town in towns_known
+
+
+## Ort (Gelände, Autobahn-Rennen …) schon entdeckt? Schlüssel "<art>:<Name>" (seit 2.49)
+func place_known(key: String) -> bool:
+	return key in places_known
+
+
+## Ort erreicht: true, wenn er neu ist (dann ein Sprungziel auf der Karte)
+func reach_place(key: String) -> bool:
+	if key == "" or key in places_known:
+		return false
+	places_known.append(key)
+	return true
 
 
 ## Stadt erreicht: merkt sie als letzte; true, wenn sie neu entdeckt ist (dann frei für die Schnellreise)
@@ -897,6 +969,11 @@ func load_game() -> void:
 	cam_shake = bool(g.get("cam_shake", true))
 	cam_mode = clampi(int(g.get("cam", 0)), 0, 3)
 	difficulty = clampi(int(data.get("difficulty", 1)), 0, 2)
+	var au = data.get("audio", {})
+	if typeof(au) == TYPE_DICTIONARY:
+		vol_music = clampi(int(au.get("music", 10)), 0, 10)
+		vol_sfx = clampi(int(au.get("sfx", 8)), 0, 10)
+	apply_audio()
 	world_pos = []
 	var wp = data.get("world_pos", [])
 	if typeof(wp) == TYPE_ARRAY and wp.size() == 4:
@@ -908,6 +985,21 @@ func load_game() -> void:
 	if typeof(db) == TYPE_DICTIONARY:
 		for k in db:
 			drift_best[str(k)] = int(db[k])
+	places_known = Array(data.get("places_known", [])).map(func(t): return str(t))
+	track_revs = {}
+	var trv = data.get("track_revs", {})
+	if typeof(trv) == TYPE_DICTIONARY:
+		for k in trv:
+			track_revs[str(k)] = int(trv[k])
+	for rn in TRACK_REVS:
+		if int(track_revs.get(rn, 0)) < int(TRACK_REVS[rn]):
+			best_times.erase(rn)  # Strecke umgebaut: alte Bestzeit gilt nicht mehr
+			track_revs[rn] = int(TRACK_REVS[rn])
+	secret_pos = {}
+	var sp = data.get("secret_pos", {})
+	if typeof(sp) == TYPE_DICTIONARY:
+		for k in sp:
+			secret_pos[str(k)] = Array(sp[k])
 	if data.has("towns_known"):
 		towns_known = Array(data["towns_known"]).map(func(t): return str(t))
 	else:
@@ -983,6 +1075,8 @@ func reset_progress() -> void:
 	xp = 0
 	world_pos = []
 	towns_known = []
+	places_known = []
+	secret_pos = {}
 	last_town = ""
 	highway_won = []
 	drift_best = {}

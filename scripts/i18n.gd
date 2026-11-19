@@ -359,6 +359,9 @@ const EN := {
 	"Unter der Hochbahn der U1 durch die Skalitzer Straße, über die Oberbaumbrücke, an der East Side Gallery entlang und über die Schillingbrücke zurück zum Kotti.":
 		"Under the elevated U1 along Skalitzer Straße, over the Oberbaumbrücke, past the East Side Gallery and back over the Schillingbrücke to Kotti.",
 	"Touch-Knöpfe im Rennen. Auto: nur auf Handy und Tablet.": "On-screen buttons in races. Auto: only on phones and tablets.",
+	"Effekte: ": "Effects: ", "Ton  >": "Sound  >", "TON": "SOUND", "Grafik, V-Sync und FPS-Limit: in der Garage unter Einstellungen.": "Graphics, V-Sync and FPS limit: in the garage under Settings.",
+	"Lautstärke der Musik.": "Music volume.",
+	"Lautstärke von Motor, Reifen, Verkehr und Menütönen.": "Volume of engine, tyres, traffic and menu sounds.",
 	"Schwierigkeit: ": "Difficulty: ", "Leicht": "Easy", "Normal": "Normal", "Schwer": "Hard",
 	"Wie stark die Gegner fahren. Leicht: zum Kennenlernen der Strecken. Schwer: schnellere Autos, und wer führt, wird gejagt.":
 		"How strong the rivals drive. Easy: for getting to know the tracks. Hard: faster cars, and whoever leads gets hunted.",
@@ -392,6 +395,22 @@ const EN := {
 	"nicht im Ziel": "did not finish", "RUNDE %d/%d": "LAP %d/%d",
 	"Splitscreen an einem Rechner: Spieler 1 oben (WASD, Leertaste Handbremse, linke Umschalttaste Nitro oder erstes Gamepad), Spieler 2 unten (Pfeiltasten, rechte Umschalttaste Handbremse, Enter Nitro, Rücktaste zurücksetzen oder zweites Gamepad). Spieler 2 fährt: %s.":
 		"Split screen on one computer: player 1 on top (WASD, space handbrake, left shift nitro or first gamepad), player 2 below (arrow keys, right shift handbrake, enter nitro, backspace reset or second gamepad). Player 2 drives: %s.",
+	# --- Karte mit Zoom und Springen (2.49) ---
+	"STÄDTE %d / %d  ·  GELÄNDE %d / %d  ·  AUTOBAHN %d / %d  ·  WERKSTÄTTEN %d / %d  ·  KENNZEICHEN %d / %d": "CITIES %d / %d  ·  OFF-ROAD %d / %d  ·  AUTOBAHN %d / %d  ·  WORKSHOPS %d / %d  ·  PLATES %d / %d",
+	# --- Versteckte Werkstätten und Kennzeichen (2.50) ---
+	"VERSTECKTE WERKSTATT": "HIDDEN WORKSHOP", "Exklusiver Lack in der Garage": "Exclusive paint in the garage",
+	"WERKSTATT ✓": "WORKSHOP ✓", "WERKSTATT ?": "WORKSHOP ?", "KENNZEICHEN ✓": "PLATE ✓", "KENNZEICHEN ?": "PLATE ?",
+	"VERSTECKTE WERKSTATT: %s": "HIDDEN WORKSHOP: %s", "Neuer Lack in der Garage: %s": "New paint in the garage: %s",
+	"KENNZEICHEN GEFUNDEN: %s": "PLATE FOUND: %s", "In der Garage: Optik > Kennzeichen": "In the garage: Looks > Plate",
+	"Kennzeichen": "Plate", "NF-G (Serie)": "NF-G (stock)",
+	"VERSTECKTE WERKSTATT IN %s": "HIDDEN WORKSHOP IN %s", "KENNZEICHEN VERSTECKT IN %s": "PLATE HIDDEN IN %s",
+	"Gesperrt: liegt in einer versteckten Werkstatt in %s. Halte nach bernsteinfarbenem Licht an einer Gasse Ausschau.": "Locked: waiting in a hidden workshop in %s. Look out for amber light down a side street.",
+	"Gesperrt: das Schild liegt irgendwo in %s versteckt.": "Locked: the plate is hidden somewhere in %s.",
+	"Verschieben": "Move", "Zoom": "Zoom", "Ort wechseln": "Next place", "Zu dir": "To you", "Springen": "Jump", "Ziel": "Target",
+	"GELÄNDE": "OFF-ROAD", "AUTOBAHN-RENNEN": "AUTOBAHN RACE", "Golfplatz zum Austoben": "Golf course to tear up",
+	"Kiesgrube zum Austoben": "Gravel pit to tear up", "SPRINGEN: FREI": "JUMP: UNLOCKED", "SPRINGEN: ERST HINFAHREN": "JUMP: DRIVE THERE FIRST",
+	"Als Ziel": "Set target", "Ziel löschen": "Clear target", "MAUSRAD": "WHEEL", "BILD↑ BILD↓": "PGUP PGDN", "LEERTASTE": "SPACE",
+	"NEU AUF DER KARTE: %s": "NEW ON THE MAP: %s", "Springen hierher frei (Karte: M)": "Jump here unlocked (map: M)",
 }
 
 static var _added := false

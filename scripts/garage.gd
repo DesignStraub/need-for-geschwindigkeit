@@ -556,6 +556,9 @@ func _view_for(cat: String) -> Array:
 			return [Vector3(W / 2.0 + 1.6, 0.55, fz - 0.6), Vector3(W / 2.0 - 0.1, 0.42, fz + 0.1)]
 		"spoiler":
 			return [Vector3(1.7, 1.55, L / 2.0 + 1.7), Vector3(0.0, 0.95, L / 2.0 - 0.35)]
+		"plate":
+			# Kennzeichen (seit 2.50): von hinten, leicht seitlich auf Höhe des Schilds
+			return [Vector3(0.9, 0.75, L / 2.0 + 1.9), Vector3(0.0, 0.42, L / 2.0)]
 		"hood":
 			return [Vector3(1.6, 1.9, -L / 2.0 - 1.9), Vector3(0.0, 0.75, -L / 2.0 + 1.0)]
 		"exhaust":
@@ -1352,6 +1355,8 @@ const CREDITS_TEXT := "Motorklänge aus echten Aufnahmen (Wikimedia Commons, CC 
 
 ## Erklärung je Einstellung (unten im Infofeld)
 const SETTING_HINTS := {
+	"vol_music": "Lautstärke der Musik.",
+	"vol_sfx": "Lautstärke von Motor, Reifen, Verkehr und Menütönen.",
 	"graphics": "Grafik wie in großen PC-Spielen: Voreinstellung wählen oder jede Option einzeln anpassen.",
 	"preset": "Niedrig: für Handy, Tablet und schwache Rechner. Mittel: ausgewogen. Hoch und Ultra: für starke Grafikkarten. Links/Rechts wechselt.",
 	"res": "Höchste Auflösung der 3D-Welt, darüber wird weich hochskaliert. Größter Hebel für die Bildrate.",
@@ -1393,6 +1398,9 @@ func _show_settings(focus := "") -> void:
 	var mo := _button("Kamera & Tempo  >", _show_motion)
 	mo.focus_entered.connect(func(): info.text = tr(SETTING_HINTS["motion"]))
 	mo.set_meta("key", "motion")
+	var so := _button("Ton  >", _show_sound)
+	so.focus_entered.connect(func(): info.text = tr(SETTING_HINTS["vol_sfx"]))
+	so.set_meta("key", "sound")
 	for key in ["language", "difficulty", "show_fps", "vsync", "fps", "fullscreen", "touch"]:
 		_setting_button(key).set_meta("key", key)
 	_button("Spielstand zurücksetzen", _confirm_reset).set_meta("key", "reset")
@@ -1428,6 +1436,19 @@ func _show_graphics() -> void:
 		_setting_button(key)
 	_button("< Zurück", _back)
 	info.text = tr(SETTING_HINTS["preset"])
+	_focus_first()
+
+
+## Ton (seit 2.52): Lautstärke von Musik und Effekten (auch im Esc-Menü von Welt und Rennen)
+func _show_sound() -> void:
+	_clear_menu()
+	_menu_width(280.0)
+	_back = _show_settings.bind("sound")
+	_set_section("TON")
+	for key in ["vol_music", "vol_sfx"]:
+		_setting_button(key)
+	_button("< Zurück", _back)
+	info.text = tr(SETTING_HINTS["vol_music"])
 	_focus_first()
 
 
@@ -2294,7 +2315,7 @@ func _color_title(cat: String, idx: int) -> String:
 	if idx == GameState.get_config(preview_car).get(cat, 0):
 		t += "   ·   " + tr("EINGEBAUT")
 	elif not GameState.is_part_unlocked(cat, idx):
-		t += "   ·   " + tr("AB LEVEL %d") % int(opt.get("level", 1))
+		t += "   ·   " + GameState.part_lock_text(cat, idx)
 	return t
 
 
@@ -2313,7 +2334,7 @@ func _refresh_parts(cat: String) -> void:
 		if i == installed:
 			sub = tr("EINGEBAUT")
 		elif locked:
-			sub = tr("AB LEVEL %d") % int(opt.get("level", 1))
+			sub = GameState.part_lock_text(cat, i)
 		var c2 := GameState.get_config(preview_car).duplicate()
 		c2[cat] = i
 		if sub == "" and (cat == "rimsize" or cat == "spur"):
@@ -2682,7 +2703,10 @@ func _part_info(cat: String, idx: int) -> void:
 					t += " " + tr("Damit sie Platz haben, liegt das Auto %d mm höher.") % roundi((float(fi["drop_in"]) - float(fi["drop"])) * 1000.0)
 			elif cat == "spur" and idx > 0 and Builder.kit_flare(c2) == 0.0:
 				t += "\n" + tr("Mit dem Breitbau-Kit rücken die Räder in die Verbreiterungen.")
-	if not GameState.is_part_unlocked(cat, idx):
+	if not GameState.is_part_unlocked(cat, idx) and opt.has("find"):
+		t += "\n" + (tr("Gesperrt: liegt in einer versteckten Werkstatt in %s. Halte nach bernsteinfarbenem Licht an einer Gasse Ausschau.")
+			if str(opt["find"]).begins_with("werkstatt:") else tr("Gesperrt: das Schild liegt irgendwo in %s versteckt.")) % str(opt["find"]).get_slice(":", 1)
+	elif not GameState.is_part_unlocked(cat, idx):
 		t += "\n" + tr("Gesperrt: kommt mit Fahrer-Level %d (du bist Level %d).") % [int(opt.get("level", 1)), GameState.level()]
 	elif idx != (_vinyl_installed() if cat == "vinyl" else GameState.get_config(preview_car).get(cat, 0)):
 		t += "\n" + tr("ENTER: einbauen")

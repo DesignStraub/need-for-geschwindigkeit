@@ -12,11 +12,13 @@ const PlayerCar := preload("res://scripts/player_car.gd")
 const PixelView := preload("res://scripts/pixel_view.gd")
 const Moods := preload("res://scripts/moods.gd")
 const UI := preload("res://scripts/ui_style.gd")
+const PauseSettings := preload("res://scripts/pause_settings.gd")
 const TACHO := preload("res://scripts/tacho.gd")
 const SPEED_FX := preload("res://shaders/speed_fx.gdshader")
 const SKY_SHADER := preload("res://shaders/night_sky.gdshader")
 const WorldMinimap := preload("res://scripts/world_minimap.gd")
 const MapView := preload("res://scripts/world_map_view.gd")
+const Secrets := preload("res://scripts/secrets.gd")
 const HighwayRace := preload("res://scripts/highway_race.gd")  # Autobahn-Rennen von Stadt zu Stadt (seit 2.43)
 const DriftMeter := preload("res://scripts/drift_meter.gd")  # Drift-Wertung mit Anzeige (seit 2.45)
 const DriftZones := preload("res://scripts/drift_zones.gd")  # Driftzone in jeder Stadt (seit 2.45)
@@ -47,6 +49,8 @@ var _tt_t := 0.0
 static var target := -1  # auf der Karte gewähltes Ziel (Rennen), gilt für diese Sitzung
 static var _travel_arrival := false  # Schnellreise: beim Neuladen den kurzen Anflug zeigen
 static var _travel_to := -1  # Schnellreise (seit 2.42): Rennen, an dessen Stadteingang man nach dem Neuladen ankommt
+static var _travel_xf := Transform3D.IDENTITY  # Springen von der Karte (seit 2.49): Ankunft hier nach dem Neuladen
+static var _travel_xf_on := false
 var _spawn_saved := false  # Start am gemerkten Ort (GameState.world_pos), nach dem Bau der Umgebung geprüft
 var _spawn_src := "test"  # woher der Startpunkt kommt (Ausgabe beim Laden)
 ## Autobahn-Rennen (seit 2.43, highway_race.gd): geplante Rennen, das laufende, Startsäulen, Punkte der Gegner
@@ -75,6 +79,8 @@ var minimap: Control
 var map_view: Control
 var _pins := {}  # race_index -> Node3D am Start (für die Minikarte, immer da)
 var pause_panel: Control
+var settings_panel: PauseSettings  # Esc > Einstellungen (seit 2.52)
+var _knocked_test := false
 var fx_mat: ShaderMaterial
 var _fx_rect: ColorRect
 var _nitro_fx := 0.0
@@ -176,7 +182,7 @@ func _ready() -> void:
 	world.add_child(pc)
 	pc.setup(GameState.current_car, GameState.get_config(GameState.current_car))
 	pc.top_speed *= GameState.pace()
-	pc.accel *= 0.8 + 0.2 * GameState.pace()
+	pc.accel *= GameState.accel_k()
 	pc.place(spawn)
 	pc.drift_mode = GameState.world_drift or OS.get_cmdline_user_args().has("--botdrift")
 	print("START %s: (%.0f, %.1f, %.0f), Stadt zuletzt %s, entdeckt %d" % [_spawn_src, spawn.origin.x, spawn.origin.y,
@@ -308,12 +314,26 @@ func _spawn_xf() -> Transform3D:
 			if parts[0] == "xy":  # --wspawn=xy:x:z:grad (Blickrichtung, 0 = Norden/-Z)
 				var yaw := deg_to_rad(float(parts[3]) if parts.size() > 3 else 0.0)
 				return Transform3D(Basis(Vector3.UP, -yaw), Vector3(float(parts[1]), 0.5, float(parts[2])))
+			if parts[0] == "strasse":  # --wspawn=strasse:rennen:Name[:m[:rück]]  auf einer echten Straße (city_net) der Stadt
+				for c in layout["cities"]:
+					if int(c["race_index"]) != int(parts[1]):
+						continue
+					var sj := Track.begin(c["race"])
+					(sj["root"] as Node).free()
+					for p in sj["track"]["paths"]:
+						if str(p.get("street_name", "")) == parts[2]:
+							var pc: Curve3D = p["curve"]
+							var m := clampf(float(parts[3]) if parts.size() > 3 else 40.0, 2.0, pc.get_baked_length() - 2.0)
+							var sx := Track.xform_at(pc, m, 0.0)
+							if parts.size() > 4:
+								sx.basis = sx.basis.rotated(Vector3.UP, PI)
+							sx = (c["xf"] as Transform3D) * sx
+							sx.origin.y += 0.5
+							return sx
+					push_warning("--wspawn=strasse: keine Straße %s" % parts[2])
 			if parts[0] == "gelaende":  # --wspawn=gelaende:i[:t[:s[:grad]]]  im Gelände i, t m hinter dem Tor (Flächenkoordinaten)
-				var ar: Dictionary = layout["offroad"][int(parts[1])]
-				var gl := Vector2(float(ar["gate_s"]) + (float(parts[3]) if parts.size() > 3 else 0.0), float(parts[2]) if parts.size() > 2 else 12.0)
-				var gdir := Offroad.wdir(ar, Vector2(0, 1).rotated(deg_to_rad(float(parts[4]) if parts.size() > 4 else 0.0)))
-				var gw := Offroad.world(ar, gl)
-				return Transform3D(Basis.looking_at(Vector3(gdir.x, 0.0, gdir.y), Vector3.UP), Vector3(gw.x, Offroad.base_h(ar, gl), gw.y))
+				return _offroad_gate_xf(int(parts[1]), float(parts[2]) if parts.size() > 2 else 12.0,
+					float(parts[3]) if parts.size() > 3 else 0.0, float(parts[4]) if parts.size() > 4 else 0.0)
 			if parts[0] == "seg":  # --wspawn=seg:ring:stück:meter  auf einem Autobahnstück (Ring 2 Kreisel, 3-6 Diagonalen)
 				for sg in layout["segments"]:
 					if sg.get("ring", 0) == int(parts[1]):
@@ -355,6 +375,10 @@ func _spawn_xf() -> Transform3D:
 		has_return = false
 		_spawn_src = "Rückkehr"
 		return return_xf
+	if _travel_xf_on:
+		_travel_xf_on = false
+		_spawn_src = "Sprung"
+		return _travel_xf
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--wstart="):  # Test: Start am Eingang der Stadt dieses Rennens (wie nach einer Schnellreise)
 			_travel_to = int(a.substr(9))
@@ -391,6 +415,15 @@ func _fallback_xf() -> Transform3D:
 	var xf: Transform3D = c["xf"] * Track.xform_at(tr["curve"], tr["start"] - 8.0, Track.LANES[1])
 	xf.basis = xf.basis * Basis(Vector3.UP, PI)
 	return xf
+
+
+## Im Gelände i, t m hinter dem Tor (s seitlich, grad gedreht), Blick hinein: Test --wspawn=gelaende, Sprungziel der Karte
+func _offroad_gate_xf(i: int, t := 12.0, s := 0.0, grad := 0.0) -> Transform3D:
+	var ar: Dictionary = layout["offroad"][i]
+	var gl := Vector2(float(ar["gate_s"]) + s, t)
+	var gdir := Offroad.wdir(ar, Vector2(0, 1).rotated(deg_to_rad(grad)))
+	var gw := Offroad.world(ar, gl)
+	return Transform3D(Basis.looking_at(Vector3(gdir.x, 0.0, gdir.y), Vector3.UP), Vector3(gw.x, Offroad.base_h(ar, gl), gw.y))
 
 
 func _has_city(ri: int) -> bool:
@@ -585,6 +618,7 @@ func _finish(e: Dictionary, job: Dictionary) -> void:
 	if e["kind"] == "city":
 		_add_marker(e)
 		_add_drift_zone(e)
+		_add_secrets(e)
 	_plan_traffic(e)
 	if player and tr["crossing"]:
 		tr["crossing"].player = player
@@ -1317,18 +1351,45 @@ func _build_hud() -> void:
 	map_view = MapView.new()
 	map_view.visible = false
 	map_layer.add_child(map_view)
-	map_view.setup(layout["roads"], layout["cities"], player)
+	map_view.setup(layout, player, hw_defs, _gate_xf, _offroad_gate_xf)
 	map_view.areas = _offroad_map()
+	for vl in layout.get("vlakes", []):
+		map_view.lakes.append([Vector2(vl["pos"].x, vl["pos"].y) if vl["pos"] is Vector2 else Vector2(vl["pos"].x, vl["pos"].z), float(vl["r"])])
 	if land:
-		map_view.relief = land.map_texture(map_view._lo, map_view._hi)
-		map_view.villages = land.villages().filter(func(v): return v[0].x > map_view._lo.x and v[0].x < map_view._hi.x \
-			and v[0].y > map_view._lo.y and v[0].y < map_view._hi.y)
+		map_view.relief = land.map_texture(map_view.relief_lo, map_view.relief_hi, 320)
+		var rl: Vector2 = map_view.relief_lo
+		var rh: Vector2 = map_view.relief_hi
+		map_view.villages = land.villages().filter(func(v): return v[0].x > rl.x and v[0].x < rh.x and v[0].y > rl.y and v[0].y < rh.y)
 		if layout.has("center"):
 			map_view.center_town = [Vector2(layout["center"].x, layout["center"].z), Layout.CENTER_NAME.to_upper()]
+	map_view.district_fn = _map_districts
 	map_view.target = target
 	map_view.target_chosen.connect(_set_target)
-	map_view.fast_travel.connect(_fast_travel)
+	map_view.target_pos_chosen.connect(_set_target_pos)
+	map_view.jump.connect(_jump)
 	map_view.closed.connect(_close_map)
+
+
+## Viertel der gebauten Städte für die große Karte (seit 2.49): Name in der Mitte jedes Abschnitts gleicher Gegend
+func _map_districts() -> Array:
+	var out := []
+	for e in entries:
+		if e["kind"] != "city" or e["state"] != "ready" or (e["track"] as Dictionary).is_empty():
+			continue
+		var trk: Dictionary = e["track"]
+		var arr: Array = trk.get("districts", [])
+		var c: Curve3D = trk["curve"]
+		var xf: Transform3D = e["xf"]
+		var i := 0
+		while i < arr.size():
+			var j := i
+			while j + 1 < arr.size() and arr[j + 1] == arr[i]:
+				j += 1
+			var md := clampf((float(i) + float(j) + 1.0) * 0.5 * Track.DISTRICT_LEN, 0.0, c.get_baked_length())
+			var p: Vector3 = xf * c.sample_baked(md)
+			out.append([Vector2(p.x, p.z), tr(Track.DISTRICTS[arr[i]]["name"])])
+			i = j + 1
+	return out
 
 
 ## Gelände für die Karten: [Umriss (Welt x, z), Farbe, Name, Teiche als Umrisse]
@@ -1363,12 +1424,17 @@ func _build_pause(root: Control) -> void:
 	pause_panel.add_theme_constant_override("separation", 3)
 	pause_panel.visible = false
 	root.add_child(pause_panel)
-	pause_panel.visibility_changed.connect(func(): dim.visible = pause_panel.visible)
+	settings_panel = PauseSettings.new()
+	root.add_child(settings_panel)
+	settings_panel.closed.connect(_settings_closed.bind(pause_panel))
+	var upd_dim := func(): dim.visible = pause_panel.visible or settings_panel.visible
+	pause_panel.visibility_changed.connect(upd_dim)
+	settings_panel.visibility_changed.connect(upd_dim)
 	var title := UI.label(pause_panel, 20, "cond", UI.TEXT, 1, HORIZONTAL_ALIGNMENT_CENTER)
 	title.text = tr("PAUSE")
 	for entry in [["Weiter", _toggle_pause], ["Karte", func(): _toggle_pause(); _open_map()],
 			["Tuning", _to_garage.bind("tuning")], ["Auto wechseln", _to_garage.bind("cars")], ["Fahrer", _to_garage.bind("driver")],
-			["Vollbild", GameState.toggle_fullscreen],
+			["Einstellungen", _open_settings],
 			["Garage", _leave_to_garage], ["Rennen aufgeben", _give_up]]:
 		var b := Button.new()
 		b.text = tr(entry[0]).to_upper()  # wie in der Garage: Großbuchstaben, linksbündig
@@ -1378,6 +1444,19 @@ func _build_pause(root: Control) -> void:
 		b.set_meta("key", entry[0])
 		pause_panel.add_child(b)
 		UI.menu_fx(b)  # Auswahl gleitet ein, Maus darüber wählt aus (wie in der Garage)
+
+
+## Esc > Einstellungen: Lautstärke, Kamera & Tempo, Anzeige, ohne die Welt zu verlassen
+func _open_settings() -> void:
+	pause_panel.visible = false
+	settings_panel.open()
+
+
+func _settings_closed(panel: Control) -> void:
+	panel.visible = true
+	for b in panel.get_children():
+		if b.get_meta("key", "") == "Einstellungen":
+			(b as Button).grab_focus()
 
 
 ## Esc > Garage: ins Hauptmenü der Garage; "Losfahren" bringt einen an die gemerkte Stelle zurück (seit 2.42)
@@ -1407,9 +1486,11 @@ func _open_map() -> void:
 	map_view.open(target)
 
 
-## Schnellreise (Karte, Leertaste): Welt neu laden, Start an der Ausfahrt dieser Stadt (wie die Startstadt)
-func _fast_travel(ri: int) -> void:
-	_travel_to = ri
+## Springen (Karte, seit 2.49; vorher Schnellreise nur in Städte): Welt neu laden, Ankunft an diesem Ort (Stadteingang,
+## Tor eines Geländes, vor dem Start eines Autobahn-Rennens)
+func _jump(xf: Transform3D) -> void:
+	_travel_xf = xf
+	_travel_xf_on = true
 	has_return = false
 	_travel_arrival = true  # kurzer Anflug von oben am Ziel
 	get_tree().paused = false
@@ -1444,8 +1525,8 @@ func _travel_test(dt: float) -> void:
 		_tt_stage = 1
 		_tt_t = 0.0
 	elif _tt_stage == 1 and _tt_t > 0.8 and map_view.visible:
-		map_view.sel = map_view.town_of(ri)
-		var town: String = map_view.towns[map_view.sel]["name"]
+		var town: String = map_view.towns[map_view.town_of(ri)]["name"]
+		map_view.select_town(town)
 		print("TRAVEL map open, town ", town, ", focus ", get_viewport().gui_get_focus_owner())
 		# seit 2.42: erst eine noch nicht entdeckte Stadt (Leertaste darf nichts tun), dann entdeckt und echt reisen
 		GameState.towns_known.erase(town)
@@ -1453,7 +1534,7 @@ func _travel_test(dt: float) -> void:
 		_tt_stage = 4
 		_tt_t = 0.0
 	elif _tt_stage == 4 and _tt_t > 1.0:
-		var town: String = map_view.towns[map_view.sel]["name"]
+		var town: String = map_view.places[map_view.sel]["name"]
 		print("TRAVEL gesperrt %s: Karte offen=%s" % ["OK" if map_view.visible else "FAIL", map_view.visible])
 		GameState.reach_town(town)
 		_tt_press(KEY_SPACE)
@@ -1494,6 +1575,14 @@ func _set_target(i: int) -> void:
 		minimap.set_target(_pins[i].position, true)
 	else:
 		minimap.set_target(Vector3.ZERO, false)
+
+
+## Ziel ohne Rennen (Karte, seit 2.49): Flagge auf der Minikarte an diesem Ort
+func _set_target_pos(pos: Vector3, on: bool) -> void:
+	if on:
+		target = -1
+	if minimap:
+		minimap.set_target(pos, on)
 
 
 func _toggle_pause() -> void:
@@ -1562,6 +1651,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		var half: float = p["half_w"] - 2.0
 		player.place(xf * Track.xform_at(p["curve"], loc["d"], clampf(loc["lat"], -half, half)))
 	elif event.is_action_pressed("pause", false, true):
+		if settings_panel.visible:
+			get_viewport().set_input_as_handled()
+			settings_panel.back()
+			return
 		_toggle_pause()
 
 
@@ -1569,13 +1662,30 @@ func _process(dt: float) -> void:
 	if not _ready_done:
 		return
 	if get_tree().paused:
-		if OS.get_cmdline_user_args().has("--wmap"):
-			_shot_check(dt)  # Test: Bild der offenen Karte
+		if OS.get_cmdline_user_args().has("--wmap") or OS.get_cmdline_user_args().has("--wsettings"):
+			_shot_check(dt)  # Test: Bild der offenen Karte bzw. der Einstellungen
 		_travel_test(dt)
 		return
 	_travel_test(dt)
 	if OS.get_cmdline_user_args().has("--wmap") and _shot_t < 0.0 and map_view and not map_view.visible:
 		_open_map()
+	if OS.get_cmdline_user_args().has("--knocktest") and _intro == null and _shot_t >= 0.0 and _shot_t < 0.7 and not _knocked_test:
+		# Test: den nächsten Passanten auf dem Gehweg vom Auto aus anstoßen (Bild kurz danach mit --wshot)
+		_knocked_test = true
+		var best: Node3D = null
+		for n in get_tree().get_nodes_in_group("knock_person"):
+			if best == null or (n as Node3D).global_position.distance_to(player.global_position) < best.global_position.distance_to(player.global_position):
+				best = n
+		if best:
+			var to := (best.global_position - player.global_position)
+			to.y = 0.0
+			print("KNOCKTEST Passant %.0f m entfernt" % to.length())
+			player.global_position = best.global_position - to.normalized() * 6.0 + Vector3(0, 0.5, 0)
+			player.look_at(best.global_position + Vector3(0, 0.5, 0), Vector3.UP)
+			best.knock(to.normalized() * 22.0, best.global_position + Vector3(0, 0.55, 0))
+	if OS.get_cmdline_user_args().has("--wsettings") and _intro == null and not settings_panel.visible and not get_tree().paused:  # Test: Esc > Einstellungen
+		_toggle_pause()
+		_open_settings()
 	if OS.get_cmdline_user_args().has("--wdrive"):
 		_autopilot()
 	for a in OS.get_cmdline_user_args():
@@ -1620,6 +1730,7 @@ func _process(dt: float) -> void:
 	_prof_mark("spawn")
 	_update_traffic_sound(dt)
 	_update_markers()
+	_update_secrets(dt)
 	_check_near_miss()
 	_update_world_drift(dt)
 	_update_challenger(dt)
@@ -1662,6 +1773,7 @@ func _update_district() -> void:
 		if on != "":
 			hud["area"].text = on.to_upper()
 			_area_t = 4.0
+			_reach_place("gelaende:" + on, on, PLACE_XP)
 	if on != "":
 		return
 	# Autobahn über Land: Name des nächsten Dorfes einblenden, wenn man vorbeifährt (wie die Gebietsnamen in NFS)
@@ -1988,6 +2100,7 @@ func _update_hw_markers(p: Vector3) -> void:
 		_near_hw = near
 		if near >= 0:
 			var df: Dictionary = hw_defs[near]
+			_reach_place("hw:" + str(df["name"]), str(df["name"]), 0)
 			var line := tr("Enter: Autobahn-Rennen starten")
 			if GameState.best_times.has(df["name"]):
 				line += "\n" + tr("Bestzeit: %s") % HighwayRace._fmt(float(GameState.best_times[df["name"]]))
@@ -2101,7 +2214,106 @@ func _reach_town(town: String) -> void:
 	if _feed == null:
 		return
 	_flash(tr("STADT ENTDECKT: %s") % town.to_upper(), UI.GOLD, TOWN_XP, TOWN_XP)
-	_flash(tr("Schnellreise hierher frei (Karte: M)"), Color(0.75, 0.8, 0.88))
+	_flash(tr("Springen hierher frei (Karte: M)"), Color(0.75, 0.8, 0.88))
+	GameState.save_game()
+
+
+# --- Verstecktes: Werkstätten und Kennzeichen (seit 2.50, secrets.gd) -------------------------------------------
+
+const SHOP_XP := 800
+const PLATE_XP := 400
+var _secrets: Array = []  # {key, kind ("shop"/"plate"), town, e, pos (Welt), node, xf (Ankunft)}
+
+
+## Stadt gebaut: Werkstatt und Kennzeichen der Stadt (nur in ihrer ersten Strecke, mehrere Rennen teilen sich die Stadt)
+func _add_secrets(e: Dictionary) -> void:
+	var town := str(Catalog.RACES[e["race_index"]].get("town", ""))
+	if town == "" or _town_race(town) != e["race_index"]:
+		return
+	var trk: Dictionary = e["track"]
+	var root: Node3D = trk["node"]
+	var xf: Transform3D = e["xf"]
+	var pl := Secrets.plan(trk, int(e["race"].get("seed", 1)))
+	var ks := "werkstatt:" + town
+	if Catalog.find_option("paint", ks) >= 0:
+		var shop: Dictionary = pl["shop"]
+		var n := Secrets.build_shop(shop, GameState.place_known(ks))
+		root.add_child(n)
+		var wp: Vector3 = xf * (shop["p"] as Vector3)
+		var away: Vector3 = xf.basis * (shop["face"] as Vector3)
+		_secrets.append({"key": ks, "kind": "shop", "town": town, "e": e, "pos": wp, "node": n,
+			"yaw": atan2(-away.z, away.x)})
+	var kp := "kennzeichen:" + town
+	var pi := Catalog.find_option("plate", kp)
+	if pi >= 0 and not GameState.place_known(kp):
+		var plate: Dictionary = pl["plate"]
+		var n2 := Secrets.build_plate(plate, str(Catalog.PARTS["plate"]["options"][pi]["code"]))
+		root.add_child(n2)
+		_secrets.append({"key": kp, "kind": "plate", "town": town, "e": e, "pos": xf * (plate["p"] as Vector3), "node": n2})
+	if OS.get_cmdline_user_args().has("--worldlog"):
+		for sx in _secrets:
+			if sx["town"] == town:
+				print("VERSTECK %s %s bei %s" % [town, sx["kind"], str(sx["pos"])])
+
+
+func _update_secrets(dt: float) -> void:
+	if player == null or _secrets.is_empty():
+		return
+	var pp := player.global_position
+	for i in range(_secrets.size() - 1, -1, -1):
+		var s: Dictionary = _secrets[i]
+		if s["e"]["state"] != "ready" or not is_instance_valid(s["node"]):
+			_secrets.remove_at(i)  # Stadt entladen: kommt beim nächsten Bau wieder
+			continue
+		var q: Vector3 = s["pos"]
+		if s["kind"] == "plate":
+			(s["node"] as Node3D).get_node("Spin").rotate_y(dt * 1.4)
+			if Vector2(pp.x - q.x, pp.z - q.z).length() < Secrets.PLATE_R and absf(pp.y + 1.0 - q.y) < 3.0:
+				_found_secret(s)
+				(s["node"] as Node3D).queue_free()
+				_secrets.remove_at(i)
+		elif not GameState.place_known(s["key"]):
+			if Vector2(pp.x - q.x, pp.z - q.z).length() < Secrets.SHOP_R:
+				_found_secret(s)
+
+
+func _found_secret(s: Dictionary) -> void:
+	if not GameState.reach_place(s["key"]):
+		return
+	var f := -player.global_basis.z
+	GameState.secret_pos[s["key"]] = [snappedf(player.global_position.x, 0.01), snappedf(player.global_position.y, 0.01),
+		snappedf(player.global_position.z, 0.01), snappedf(atan2(-f.x, -f.z), 0.001)]
+	print("VERSTECK gefunden: ", s["key"])
+	Sfx.ui("install")
+	if s["kind"] == "shop":
+		var opt: Dictionary = Catalog.PARTS["paint"]["options"][Catalog.find_option("paint", s["key"])]
+		_flash(tr("VERSTECKTE WERKSTATT: %s") % str(s["town"]).to_upper(), Color(1.0, 0.62, 0.16), SHOP_XP, SHOP_XP)
+		_flash(tr("Neuer Lack in der Garage: %s") % tr(str(opt["name"])), Color(0.75, 0.8, 0.88))
+		_flash(tr("Springen hierher frei (Karte: M)"), Color(0.75, 0.8, 0.88))
+	else:
+		var po: Dictionary = Catalog.PARTS["plate"]["options"][Catalog.find_option("plate", s["key"])]
+		_flash(tr("KENNZEICHEN GEFUNDEN: %s") % str(po["code"]), UI.GOLD, PLATE_XP, PLATE_XP)
+		_flash(tr("In der Garage: Optik > Kennzeichen"), Color(0.75, 0.8, 0.88))
+	GameState.save_game()
+
+
+## Erfahrung für ein neu entdecktes Gelände (eine Stadt bringt 500)
+const PLACE_XP := 300
+
+
+## Ort außer einer Stadt erreicht (seit 2.49): beim ersten Mal ein Sprungziel auf der Karte (Zeile über der Minikarte)
+func _reach_place(key: String, label: String, xp: int) -> void:
+	if not GameState.reach_place(key):
+		return
+	print("ORT entdeckt: ", key)
+	_spot_dirty = true
+	if _feed == null:
+		return
+	if xp > 0:
+		_flash(tr("NEU AUF DER KARTE: %s") % label.to_upper(), UI.GOLD, xp, xp)
+	else:
+		_flash(tr("NEU AUF DER KARTE: %s") % label.to_upper(), UI.GOLD)
+	_flash(tr("Springen hierher frei (Karte: M)"), Color(0.75, 0.8, 0.88))
 	GameState.save_game()
 
 
@@ -2445,7 +2657,9 @@ func _update_speed_fx(dt: float) -> void:
 	_cam_yaw_prev = yaw
 	_swing = lerpf(_swing, clampf(rate * 0.012, -0.03, 0.03), 1.0 - exp(-dt * 10.0))
 	var kmh: float = player.velocity.length() * 3.6
-	var sk := smoothstep(90.0, 235.0, kmh)
+	# seit 2.49 ab 75 km/h, voll bei 225 (vorher 90 bis 235): weniger km/h, das Tempogefühl kommt wie in Underground
+	# aus Unschärfe und Lichtspuren
+	var sk := smoothstep(75.0, 225.0, kmh)
 	# Anflug von oben: Zoom-Unschärfe nur während der Sprünge, Fluchtpunkt ist das Auto im Bild
 	var zb: float = _intro.blur * lvl if _intro != null else 0.0
 	var blur := lvl * (0.115 * sk * sk + 0.075 * _nitro_fx) + zb

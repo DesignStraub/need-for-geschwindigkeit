@@ -19,6 +19,7 @@ extends RefCounted
 
 const Track := preload("res://scripts/track_builder.gd")
 const City := preload("res://scripts/city_builder.gd")
+const CityNet := preload("res://scripts/city_net.gd")  # echte Straßen aus OpenStreetMap (seit 2.52, tools/osm_net.py)
 
 const CLS := {
 	"gasse": {"half": 3.3, "lanes": 0.0, "walk": 1.0},
@@ -49,6 +50,7 @@ const HOUSE_ROOM := 13.0  # hinter einer Nebenstraße muss noch eine Häuserreih
 
 ## Test (Prüfwerkzeuge): Gründe, warum Kandidaten nicht passten (Q_ = Querverbindungen)
 static var why := {}
+static var no_net := false  # tools/net_blocks.gd: Strecke ohne das eigene Netz planen (dessen Einmündungen wären sonst Sperren)
 static var _pre := ""
 
 
@@ -56,6 +58,8 @@ static var _pre := ""
 
 ## Straßennetz einer Welt-Stadt planen (nach Ausfahrten und Querstraßen der Entwürfe)
 static func plan(track: Dictionary, race: Dictionary) -> void:
+	if no_net:
+		return  # tools/net_blocks.gd: nur die Hauptstraße mit ihren Ausfahrten
 	var rng := RandomNumberGenerator.new()
 	rng.seed = int(race["seed"]) * 31 + 7
 	# Querstraßen der Entwürfe (track_design.plan_cross): Gehwege, Parkbuchten, Ampeln wie die neuen Straßen
@@ -65,16 +69,32 @@ static func plan(track: Dictionary, race: Dictionary) -> void:
 				"lanes": 2.0, "cobble": 0.0, "ends": [{"at": 0, "d": p["from"]}, {"at": 0, "d": p["to"]}]})
 			p["strip_kind"] = ["", "park" if p["strip"][1] > 0.0 else ""]
 	var ctx := _ctx(track, race)
-	_pre = "Q_"
-	_plan_links(ctx, rng)
-	_pre = ""
-	_plan_parallels(ctx, rng)
+	# Echte Städte mit Straßennetz (seit 2.52): die echten Straßen statt erfundener Querverbindungen und Parallelstraßen
+	# (die waren oft nur kurze Schleifen neben dem Ring, die nirgendwohin führten)
+	var net := net_for(race)
+	if not net.is_empty():
+		_plan_osm(ctx, net, rng)
+	else:
+		_pre = "Q_"
+		_plan_links(ctx, rng)
+		_pre = ""
+		_plan_parallels(ctx, rng)
 	_plan_plazas(ctx, rng)
 	_drop_keepout(ctx)
 	_plan_junctions(ctx)
 	for z in ctx["mz"]:
 		track["zones"].append({"from": z[0] - z[1], "to": z[0] + z[1]})
 	track["net"] = true
+
+
+## Straßennetz aus city_net.gd: echte Städte nach "city", entworfene nach "layout" (leer: keins)
+static func net_for(race: Dictionary) -> Array:
+	if no_net:
+		return []
+	for k in [str(race.get("city", "")), str(race.get("layout", "")), str(race.get("net", ""))]:  # net: entworfen ohne Layout (Berlin)
+		if k != "" and CityNet.NETS.has(k):
+			return CityNet.NETS[k]
+	return []
 
 
 static func _w(k: String) -> bool:
@@ -277,7 +297,7 @@ static func _osm_cost(ctx: Dictionary, pts: PackedVector2Array, reach: float) ->
 
 ## Kann die Hauptstraße bei d eine Einmündung zur Seite s aufnehmen? (flach, kein Tunnel/Trog/Brücke, keine Hochbahn
 ## auf der Seite, kein Mittelstreifen, kein Bahnübergang, kein anderer Abzweig, nicht zu kurvig)
-static func _mouth_ok(ctx: Dictionary, d: float, s: float, w: float, allow_d := -1e9) -> bool:
+static func _mouth_ok(ctx: Dictionary, d: float, s: float, w: float, allow_d := -1e9, min_r := 45.0) -> bool:
 	var track: Dictionary = ctx["track"]
 	# eigene Einmündungen (Abstand zueinander); an allow_d mündet gegenüber schon eine (Kreuzung in einer Flucht)
 	for z in ctx["mz"]:
@@ -299,7 +319,7 @@ static func _mouth_ok(ctx: Dictionary, d: float, s: float, w: float, allow_d := 
 		dd += 5.0
 	if track["crossing_d"] >= 0.0 and absf(d - track["crossing_d"]) < 70.0:
 		return _w("mund_bahn")
-	if Track._min_radius(curve, d, ctx["loop"]) < 45.0:
+	if Track._min_radius(curve, d, ctx["loop"]) < min_r:
 		return _w("mund_kurve")
 	return true
 
@@ -308,6 +328,8 @@ static func _zone(ctx: Dictionary, d: float) -> bool:
 	var track: Dictionary = ctx["track"]
 	var L: float = track["length"]
 	for z in track["zones"]:
+		if z.get("clear", false):
+			continue  # Schikanen der Entwürfe: dort nur keine Poller und Hydranten, Straßen dürfen einmünden
 		var skip := false
 		for jd in ctx["skip_zones"]:
 			if is_equal_approx(z["from"], jd - 40.0) and is_equal_approx(z["to"], jd + 40.0):
@@ -528,6 +550,88 @@ static func _add(ctx: Dictionary, kind: String, pts: PackedVector3Array, sec: Di
 
 static func _mouth_zone(ctx: Dictionary, d: float, w: float) -> void:
 	ctx["mz"].append([d, w + 4.0])
+
+
+# --- Echtes Straßennetz (seit 2.52) -----------------------------------------------------------------------------------
+
+## Straßen aus city_net.gd (tools/osm_net.py): jede schließt an beiden Enden an (Hauptstraße oder andere Straße), die
+## Kreuzungen untereinander bleiben offen (branch_clear). Querschnitt je Klasse wie die erfundenen Straßen.
+static func _plan_osm(ctx: Dictionary, net: Array, rng: RandomNumberGenerator) -> void:
+	var track: Dictionary = ctx["track"]
+	var curve: Curve3D = ctx["curve"]
+	# Straßen quer durch den Korridor einer Ausfahrt fallen weg (die Auffahrt zur Autobahn läuft dort weiter), mit
+	# allem, was nur an ihnen hängt: so entsteht keine Sackgasse
+	var drop := {}
+	for i in net.size():
+		var raw0: Array = net[i]["pts"]
+		var rr: float = CLS[str(net[i]["cls"])]["half"] + CLS[str(net[i]["cls"])]["walk"] + STRIP_W
+		var n0 := raw0.size() / 2
+		for k in range(0, raw0.size(), 8):
+			var q := Vector2(raw0[k], raw0[k + 1])
+			for cp in ctx["caps"]:
+				var a: Vector2 = cp[0]
+				var ab: Vector2 = cp[1] - a
+				var t := clampf((q - a).dot(ab) / maxf(ab.length_squared(), 0.001), 0.0, 1.0)
+				if t > 0.0 and q.distance_to(a + ab * t) < rr + cp[2]:
+					drop[i] = true
+			# Wahrzeichen, Wasser, Parks, Hügel, Bahn (die ersten und letzten Meter liegen an der Einmündung)
+			if k / 2 > 6 and k / 2 < n0 - 6 and not drop.has(i):
+				var wb := _blocked(ctx, q, rr - 2.0)
+				if wb != "" and wb != "ausfahrt":
+					drop[i] = true
+					why["osm_" + wb] = why.get("osm_" + wb, 0) + 1
+	var changed := true
+	while changed:
+		changed = false
+		for i in net.size():
+			if drop.has(i):
+				continue
+			for e in net[i]["ends"]:
+				if e.has("street") and drop.has(int(e["street"])):
+					drop[i] = true
+					changed = true
+	why["osm_ausfahrt"] = drop.size()
+	var made := []
+	for i0 in net.size():
+		var st: Dictionary = net[i0]
+		if drop.has(i0):
+			made.append(null)
+			continue
+		var raw: Array = st["pts"]
+		var pts := PackedVector3Array()
+		for k in range(0, raw.size(), 2):
+			pts.append(Vector3(raw[k], 0.0, raw[k + 1]))
+		if pts.size() < 3:
+			made.append(null)
+			continue
+		var mid_d := curve.get_closest_offset(pts[pts.size() / 2])
+		var sec := _section(ctx, str(st["cls"]), mid_d, rng)
+		var ends: Array = st["ends"]
+		var d0 := curve.get_closest_offset(pts[0])
+		var d1 := curve.get_closest_offset(pts[pts.size() - 1])
+		var p := _add(ctx, "lane", pts, sec, d0, d1, 0.0, {"osm": true, "street_name": str(st.get("name", ""))})
+		for k in 2:
+			if ends[k].get("main", false):
+				var dm := d0 if k == 0 else d1
+				_mouth_zone(ctx, dm, sec["half"] + sec["walk"])
+		made.append(p)
+	# Enden: in die Hauptstraße oder an eine andere Straße (T-Einmündung)
+	for i in net.size():
+		var p = made[i]
+		if p == null:
+			continue
+		var ends: Array = net[i]["ends"]
+		var c: Curve3D = p["curve"]
+		var out := []
+		for k in 2:
+			var q := c.sample_baked(0.0 if k == 0 else c.get_baked_length())
+			if ends[k].get("main", false):
+				out.append({"at": 0, "d": curve.get_closest_offset(q)})
+			else:
+				var o = made[int(ends[k]["street"])]
+				if o != null:
+					out.append({"at": o["id"], "d": (o["curve"] as Curve3D).get_closest_offset(q)})
+		p["ends"] = out
 
 
 # --- Querverbindungen ------------------------------------------------------------------------------------------------
@@ -1186,11 +1290,21 @@ static func _plan_plazas(ctx: Dictionary, rng: RandomNumberGenerator) -> void:
 			for i in pts.size():
 				var q := Vector2(pts[i].x, pts[i].z)
 				if float(i) * 2.0 < e0 + 2.0:
+					# Einfahrt: liegt sie an einer Kreuzung, ragte der Platz in die andere Straße (seit 2.52 geprüft)
+					for lat0 in [-half, half]:
+						if _branch_near(ctx, q + Vector2(f["fwd"].x, f["fwd"].z) * lat0, [p["id"]], 40.0) < 2.0:
+							ok = false
 					continue
 				for lat in [-half, 0.0, half]:
 					var qq: Vector2 = q + Vector2(f["fwd"].x, f["fwd"].z) * lat
 					if _main_near(ctx, qq, 40.0).x < Track.WALK + 6.0 or _branch_near(ctx, qq, [p["id"]], 40.0) < 5.0 \
 							or _blocked(ctx, qq, 3.0) != "":
+						ok = false
+					# auch die eigene Straße: in einer Haarnadel lag ihr anderer Schenkel im Platz (geparkte Autos auf der
+					# Fahrbahn, seit 2.52 geprüft)
+					var q3 := Vector3(qq.x, 0.0, qq.y)
+					var cp := c.get_closest_point(q3)
+					if Vector2(cp.x - qq.x, cp.z - qq.y).length() < minf(float(i) * 2.0, e0 + 5.0) - 1.0:
 						ok = false
 				if not ok:
 					break
@@ -1463,7 +1577,7 @@ static func build_street(root: Node3D, track: Dictionary, p: Dictionary, rng: Ra
 	walls.name = "WallsBranch%d" % p["id"]
 	root.add_child(walls)
 	var up := Vector3(0, Track.CURB_H, 0)
-	var lift := Vector3(0, 0.004, 0)  # Gehweg der Nebenstraße knapp über dem der Hauptstraße (an der Ecke liegen beide)
+	var lift := Vector3(0, 0.012, 0)  # Gehweg der Nebenstraße knapp über dem der Hauptstraße (an der Ecke liegen beide; 0,4 cm flackerten von weitem)
 	var runs := [[], []]  # je Seite: gebaute Stücke des Streifens [d0, d1]
 	var wall_runs := [[], []]  # je Seite: Wandstücke [Punkt a, Punkt b, d] (für Hecken, Mauern, Poller am Platz)
 	var own: int = p["id"]
@@ -1490,8 +1604,32 @@ static func build_street(root: Node3D, track: Dictionary, p: Dictionary, rng: Ra
 			var reach_all: float = half + maxf(float(sw[0]), float(sw[1])) + walk + 1.0
 			var mc0 := main_clear(track, mid)
 			var free := mc0 > reach_all + Track.WALK + 2.0 and branch_clear(track, mid, true, true, own) > reach_all + 1.5
-			if mc0 > -0.3:
+			# Fahrbahn genau an der Kante der Hauptstraße abschneiden (seit 2.52): vorher ragte sie bis 3,5 m als dunkles
+			# Rechteck in die Hauptstraße und flackerte mit deren Asphalt. Gemessen an beiden Rändern des Stücks.
+			var e0 := minf(main_clear(track, c0 - r0 * half), main_clear(track, c0 + r0 * half))
+			var e1 := minf(main_clear(track, c1 - r1 * half), main_clear(track, c1 + r1 * half))
+			if e0 >= 0.0 and e1 >= 0.0:
 				Track._strip(road, c0 - r0 * half, c0 + r0 * half, c1 - r1 * half, c1 + r1 * half, prev["d"], d)
+			elif e0 >= 0.0 or e1 >= 0.0:
+				# Kante im Stück: auf den Teil außerhalb der Hauptstraße kürzen (Halbierung)
+				var lo := 0.0 if e0 >= 0.0 else 1.0
+				var hi := 1.0 if e0 >= 0.0 else 0.0
+				for it in 10:
+					var tm := (lo + hi) / 2.0
+					var cm := c0.lerp(c1, tm)
+					var rmm := r0.lerp(r1, tm).normalized()
+					if minf(main_clear(track, cm - rmm * half), main_clear(track, cm + rmm * half)) >= 0.0:
+						lo = tm
+					else:
+						hi = tm
+				var tc := lo
+				var cc := c0.lerp(c1, tc)
+				var rc := r0.lerp(r1, tc).normalized()
+				var dc: float = lerpf(prev["d"], d, tc)
+				if e0 >= 0.0:
+					Track._strip(road, c0 - r0 * half, c0 + r0 * half, cc - rc * half, cc + rc * half, prev["d"], dc)
+				else:
+					Track._strip(road, cc - rc * half, cc + rc * half, c1 - r1 * half, c1 + r1 * half, dc, d)
 			for i in 2:
 				var sd := -1.0 if i == 0 else 1.0
 				var a1: float = half + float(sw[i])
@@ -1548,6 +1686,14 @@ static func build_street(root: Node3D, track: Dictionary, p: Dictionary, rng: Ra
 					continue
 				if not free and branch_clear(track, wm, true, true, own) < 0.3:
 					continue
+				# Innenseite enger Kurven (seit 2.52): ist der Radius kleiner als der Abstand der Wand, faltet sich ihre Linie
+				# zurück und liegt auf der eigenen Fahrbahn (unsichtbare Wand in kleinen, eckigen Kurven). Die Lücke
+				# schließt danach Track._stitch_walls außen herum.
+				if r0.dot(r1) < 0.995:
+					var lim := a2 + 0.3 - 0.5
+					if Track._flat(wa - c.get_closest_point(wa)).length() < lim or Track._flat(wb - c.get_closest_point(wb)).length() < lim \
+							or Track._flat(wm - c.get_closest_point(wm)).length() < lim:
+						continue
 				Track._wall_shape(walls, wa, wb)
 				wall_runs[i].append([wa, wb, d, rm * sd])
 		prev = cur
@@ -1620,7 +1766,17 @@ static func _strip_details(root: Node3D, track: Dictionary, p: Dictionary, runs:
 					var fa2 := Track.frame_at(c, x - 4.0)
 					var fb2 := Track.frame_at(c, x + 9.6)
 					var bend: float = (fa2["fwd"] as Vector3).angle_to(fb2["fwd"]) / 13.6
-					if bend < 1.0 / 70.0 and rng.randf() < 0.72:
+					# und nie mit der Schnauze auf einer anderen Fahrbahn (schräge Einmündungen, seit 2.52)
+					var car_free := true
+					for o in [-2.4, 0.0, 2.4]:
+						for l in [-0.9, 0.9]:
+							var cq: Vector3 = pos + f["fwd"] * o + f["right"] * l
+							if branch_clear(track, cq, true, false, p["id"]) < 0.2 or main_clear(track, cq) < 0.2:
+								car_free = false
+							# eigene Straße: in einem spitzen Knick stand der eine Schenkel auf dem anderen
+							elif Track._flat(cq - c.get_closest_point(cq)).length() < half + 0.2:
+								car_free = false
+					if car_free and bend < 1.0 / 70.0 and rng.randf() < 0.72:
 						var bs := Basis.looking_at(f["fwd"] * (1.0 if rng.randf() < 0.5 else -1.0), Vector3.UP)
 						cars.append(Transform3D(bs, pos + f["fwd"] * rng.randf_range(-0.3, 0.3)))
 					var fl := Track.frame_at(c, x)
@@ -1932,7 +2088,16 @@ static func build_junctions(root: Node3D, track: Dictionary, rng: RandomNumberGe
 ## Steht ein Mast hier auf keiner Fahrbahn (weder Hauptstraße noch ein Weg)?
 static func _free_spot(root: Node3D, pos: Vector3) -> bool:
 	var track: Dictionary = root.get_meta("track_ref")
-	return main_clear(track, pos) > 0.4 and branch_clear(track, pos, true, false) > 0.4
+	if main_clear(track, pos) <= 0.4 or branch_clear(track, pos, true, false) <= 0.4:
+		return false
+	# genau gegen jede Fahrbahn (seit 2.52): das Raster misst nur zu Stützpunkten, ein Mast stand so in einer Einfahrt
+	for p in track["paths"]:
+		if int(p["id"]) == 0 or p["kind"] == "spur":
+			continue
+		var cp := (p["curve"] as Curve3D).get_closest_point(pos)
+		if Track._flat(cp - pos).length() < float(p["half_w"]) + 0.6:
+			return false
+	return true
 
 
 static func _mm_add(mm: Dictionary, key: String, mesh: Mesh, mat: Material, xf: Transform3D) -> void:
