@@ -255,6 +255,24 @@ Außenring → nächste Stadt → Autobahn. Rundkurse und Drift-Kurse sind Schle
 - **Köln als Pilot für größere Städte: Innenstadtring mit Altstadt-Schleife** (seit 2.51, Einzelheiten dort).
 - **Straßennetze in allen Städten, dichte Ränder, Höfe, Passanten zum Umfahren, leisere Motoren** (seit 2.52,
   Einzelheiten dort).
+- **Kantigere Autos, mehr Bilder pro Sekunde, Kuppen in den Städten, Bergland** (seit 2.53, Einzelheiten dort).
+
+## Kantigere Autos, mehr Bilder pro Sekunde, Kuppen, Bergland (2.53)
+- **Autos:** je Modell eigene Kantigkeit (flache Dächer, harte Kanten bei den eckigen Vorbildern), Klappscheinwerfer
+  nur noch als saubere, geschlossene Deckel, Lippe und Diffusor sitzen an, eigene Proportionen für mehrere Modelle;
+  die Front hebt beim Driften kaum noch an.
+- **Bilder pro Sekunde:** parkende Autos nur bis 220 m mit Details, dahinter als einfache Form, ab 700 m gar nicht
+  (vorher wurden alle Teile aller parkenden Autos der Stadt gezeichnet); die Minikarte zeichnet nur noch die Straßen
+  in ihrer Nähe. Testfahrt durch Aachen in der freien Fahrt: 99 statt vorher 60 fps.
+- **Kuppen in den Städten:** kurze Kuppen (1,5 m hoch, je 30 m Anstieg) auf den Hauptstraßen fast aller Städte, eine
+  je gut 850 m, höchstens vier, nur auf Geraden und weit weg von Einmündungen, Start, Bahnübergang, Tunneln und
+  Hochbahn. Ab gut 155 km/h hebt das Auto ab. Ohne Kuppen: Hamburg (zu viele Einmündungen) und Stuttgart (schon hügelig
+  entworfen). Die Kamera folgt der Höhe weicher und sackt beim Aufsetzen kurz ein, wie in Underground.
+- **Bergland:** im Inneren des Rings rund um die südliche Querspange Berge bis gut 400 m; die Querspange wird zur
+  Passstraße (bis 10 % Steigung, oben gut 115 m hoch, zwischen Hängen, die 150 m und mehr darüber aufragen).
+- **Autobahn weniger eintönig:** die Straßen über Land folgen dem Gelände enger (höchstens 62 statt 42 m hoch, weniger
+  geglättet) und heben und senken sich zusätzlich in Wellen von etwa einem Kilometer. An Städten, Auffahrten und
+  Dreiecken bleibt es flach; der innere Ring ist dadurch weiter fast eben.
 
 ## Straßennetze in allen Städten (2.52)
 - **Straßennetze:** Aachen, Würzburg, Bad Kissingen, Tauberbischofsheim und Hammelburg mit echten Straßen aus

@@ -159,6 +159,16 @@ func _process(dt: float) -> void:
 					if "shadow" in kinds:
 						nd.shadow_enabled = false
 				st.append_array(nd.get_children())
+	if OS.get_cmdline_user_args().has("--nohud"):
+		# Test: Bild ohne Oberfläche (Entwürfe für Anzeige und Schrift darüberlegen); Ebenen in der 3D-Welt bleiben
+		var stk: Array = get_tree().root.get_children()
+		while not stk.is_empty():
+			var nd: Node = stk.pop_back()
+			if nd is SubViewport:
+				continue
+			if nd is CanvasLayer and nd.layer >= 0:
+				nd.visible = false
+			stk.append_array(nd.get_children())
 	if OS.get_cmdline_user_args().has("--nomusic"):
 		for mp in Music._players:
 			mp.volume_db = -80.0  # Musik aus (Aufnahmen mit eigener Musik, Effekte allein)
@@ -452,7 +462,7 @@ func _process(dt: float) -> void:
 				near += " T(%.1f,%.1f)" % [t.progress - pl.progress, t.lateral()]
 		print("t=%.1f d=%.1f lat=%.2f v=%.1f path=%d y=%.2f luft=%s fps=%d%s" % [_t, pl.progress, pl.lateral, pl.speed_fwd, pl.path_id, pl.position.y, pl.airborne, Engine.get_frames_per_second(), near])
 		print("   runde=%d gesamt=%.0f ziel=%.0f status=%d platz=%d drift=%d kette=%d" % [pl.lap, pl.total, race.track["finish"], race.state, race._place(), int(race.drift_score), int(race.drift_chain)])
-		print("   rutscht=%s winkel=%.0f tempo=%.1f lenk=%.2f wand=%d manoever=%.2f" % [pl._sliding, pl.drift_angle, pl.velocity.length(), pl.steer, pl.wall_hits, _drift_t])
+		print("   rutscht=%s winkel=%.0f tempo=%.1f lenk=%.2f wand=%d manoever=%.2f" % [str(pl.get("_sliding")), pl.drift_angle, pl.velocity.length(), pl.steer, pl.wall_hits, _drift_t])
 		for n in get_tree().get_nodes_in_group("ambient"):
 			if "_cars" in n:
 				print("   zug aktiv=%s d=%.0f (%.0f-%.0f) sichtbar=%s y=%.1f" % [n._active, n._d, n.d_from, n.d_to, n._cars[0].visible, n._cars[0].global_position.y])
@@ -687,6 +697,7 @@ func _bench_report(race) -> void:
 	print("BENCH race=%s q=%d frames=%d frame=%.2fms med=%.2fms p99=%.2fms gpu=%.2fms gpu3d=%.2fms process=%.2fms physics=%.2fms draws=%d objs=%d tris=%dk %s" % [
 		race.race["name"], GameState.preset, _bench.size(), sums[0] / n, med, worst[int(n * 0.99) - 1], sums[1] / n, sums[2] / n,
 		sums[6] / n, sums[7] / n, int(sums[3] / n), int(sums[4] / n), int(sums[5] / n / 1000.0), counts])
+	print("BENCH fenster=%s 3d=%s skala=%.2f" % [DisplayServer.window_get_size(), race.world.size if "size" in race.world else get_viewport().size, get_viewport().scaling_3d_scale])
 	print("BENCH audio=%.3fms" % [EngineAudioScript.bench_us / 1000.0 / n])
 	print("BENCH spikes=%d %s" % [spikes.size(), " ".join(spikes.slice(0, 40))])
 	print("BENCH vram=%dMB tex=%dMB buf=%dMB" % [Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0,

@@ -328,6 +328,7 @@ static func begin(race: Dictionary) -> Dictionary:
 		_plan_rivers(track)
 		_plan_hills(track)
 		_plan_city_crossing(track, race)
+		_plan_city_crests(track, race)
 		if race.get("city", "") == "kreuzberg":
 			_plan_kreuzberg_el(track)
 		_plan_spurs(track, rng)
@@ -368,6 +369,8 @@ static func begin(race: Dictionary) -> Dictionary:
 		_plan_spurs(track, rng)
 		if not track.has("fixed_el"):
 			_plan_el(track, rng)  # Stadt-Entwürfe: Hochbahn und Mittelstreifen nur, wo sie es wollen (Design.plan)
+		if type in ["circuit", "sprint"]:
+			_plan_city_crests(track, race)
 		if not track.has("fixed_medians"):
 			_plan_medians(track, rng)
 	if not track["elev0"].is_empty():
@@ -5350,6 +5353,98 @@ static func _plan_city_crossing(track: Dictionary, race: Dictionary) -> void:
 			continue
 		_set_crossing(track, d)
 		return
+
+
+## Kuppen auf der Hauptstraße echter Städte (seit 2.53, Rückmeldung: "Höhenunterschiede brauchen wir", Abheben wie
+## in Underground). Je Stadt CITY_CRESTS Stück, nur auf Geraden und weit weg von Einmündungen (Straßennetz aus
+## city_net.gd), Start, Ziel, Bahnübergang und Brücken. Form: CREST_H hoch, CREST_RAMP lang hinauf und hinunter,
+## oben CREST_TOP flach. Die Krümmung oben (6 h / l²) lässt das Auto ab gut 155 km/h abheben (player_car, crest).
+## Als Zone eingetragen: dort mündet nichts ein, keine Sackgasse, kein Mittelstreifen.
+const CITY_CRESTS := {"aachen": 3}  # sonst eine je CREST_EVERY Meter, höchstens CREST_MAX
+const CREST_EVERY := 850.0
+const CREST_MAX := 4
+const CREST_H := 1.5
+const CREST_RAMP := 30.0
+const CREST_TOP := 8.0
+const CREST_CLEAR := 30.0  # so weit bleibt jede Einmündung vom Fuß der Kuppe weg
+
+## Wie _in_zone, aber ohne lange Zonen (über 300 m: Abschnitte ohne Seitenstraßen, etwa die Kölner Altstadt-Schleife);
+## kurze Zonen sind Einmündungen, Bahnübergänge und Start
+static func _in_short_zone(track: Dictionary, d: float, margin: float) -> bool:
+	for z in track["zones"]:
+		if float(z["to"]) - float(z["from"]) <= 300.0 and d > z["from"] - margin and d < z["to"] + margin:
+			return true
+	return false
+
+
+static func _plan_city_crests(track: Dictionary, race: Dictionary) -> void:
+	if race.get("type", "") not in ["circuit", "sprint"] or OS.get_cmdline_user_args().has("--nocrests"):
+		return
+	var key := str(race.get("city", race.get("layout", "")))
+	var want: int = CITY_CRESTS.get(key, clampi(int(float(track["length"]) / CREST_EVERY), 1, CREST_MAX))
+	if want <= 0:
+		return
+	var curve: Curve3D = track["curve"]
+	var L: float = track["length"]
+	var loop: bool = track["loop"]
+	# Einmündungen des Straßennetzes in die Hauptstraße
+	var mouths := []
+	for st in Streets.net_for(race):
+		var pts: Array = st["pts"]
+		var ends: Array = st["ends"]
+		for ei in ends.size():
+			if not ends[ei].get("main", false):
+				continue
+			var k := 0 if ei == 0 else pts.size() - 2
+			mouths.append(curve.get_closest_offset(Vector3(pts[k], 0.0, pts[k + 1])))
+	var half := CREST_RAMP + CREST_TOP / 2.0
+	var cand := []
+	var d := 160.0
+	while d < (L - 160.0 if loop else minf(L, track["finish"]) - 160.0):
+		var ok := not _in_short_zone(track, d, half + 20.0) and bridge_at(track, d).is_empty() and absf(elev_at(curve, d)) < 0.05 \
+			and tunnel_at(track, d, half + 40.0).is_empty() and _el_side(track, d, half + 20.0) == 0.0 and _trough_at(track, d) == 0
+		if ok and track["crossing_d"] >= 0.0 and absf(d - track["crossing_d"]) < half + 80.0:
+			ok = false
+		if ok:
+			for m in mouths:
+				var dm := absf(d - m)
+				if loop:
+					dm = minf(dm, L - dm)
+				if dm < half + CREST_CLEAR:
+					ok = false
+					break
+		if ok:
+			var f0 := frame_at(curve, d - half - 20.0)
+			var f1 := frame_at(curve, d + half + 20.0)
+			ok = (f0["fwd"] as Vector3).angle_to(f1["fwd"]) < 0.2
+		if ok:
+			cand.append(d)
+		d += 5.0
+	# gleichmäßig verteilt: jeweils die Stelle, die am weitesten von den schon gewählten liegt
+	var picked := []
+	while picked.size() < want and not cand.is_empty():
+		var best := -1.0
+		var bd := -1e18
+		for c in cand:
+			var dist := 1e9
+			for p in picked:
+				var x := absf(c - p)
+				dist = minf(dist, minf(x, L - x) if loop else x)
+			if picked.is_empty():
+				dist = -absf(c - L * 0.5)  # erste möglichst mittig
+			if dist > bd:
+				bd = dist
+				best = c
+		if picked.size() > 0 and bd < 2.0 * half + 60.0:
+			break
+		picked.append(best)
+		cand = cand.filter(func(c): return absf(c - best) > 2.0 * half + 60.0)
+	for c in picked:
+		track["elev0"].append({"a": c - half, "b": c - CREST_TOP / 2.0, "c": c + CREST_TOP / 2.0, "e": c + half, "h": CREST_H})
+		track["zones"].append({"from": c - half - 10.0, "to": c + half + 10.0})
+		track["city_crests"] = track.get("city_crests", []) + [c]
+	if OS.get_cmdline_user_args().has("--leakcheck"):
+		print("KUPPEN %s: %d von %d bei %s" % [key, picked.size(), want, str(picked.map(func(x): return int(x)))])
 
 
 # --- Bebauung --------------------------------------------------------------
